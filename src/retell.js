@@ -55,12 +55,6 @@ async function createPhoneCall(lead, agent, consentRecordId) {
   return { callId, retellCallId: data.call_id ?? data.id, simulated: false };
 }
 
-/** Verify webhook signature (simple token compare; upgrade to HMAC per Retell docs). */
-function webhookAuthorized(req) {
-  if (!cfg.RETELL_WEBHOOK_TOKEN) return true; // open in simulation/dev
-  return req.get('x-retell-signature') === cfg.RETELL_WEBHOOK_TOKEN;
-}
-
 function findCallByRetellId(retellCallId) {
   return db.prepare('SELECT * FROM calls WHERE retell_call_id = ?').get(retellCallId);
 }
@@ -68,4 +62,4 @@ function findCallById(callId) {
   return db.prepare('SELECT * FROM calls WHERE id = ?').get(callId);
 }
 
-module.exports = { createPhoneCall, webhookAuthorized, findCallByRetellId, findCallById, simulation };
+module.exports = { createPhoneCall, findCallByRetellId, findCallById, simulation };

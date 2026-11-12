@@ -53,8 +53,11 @@ you spend anything on telephony.
    | `book_callback` | `POST /retell/function/book-callback` |
    The function body must include the call `metadata` (the server passes
    `call_id`/`lead_id`/`agent_id` on every dial; configure the function to return it).
-4. Set webhooks (Retell dashboard → Webhooks) to `POST /retell/webhook` and copy the
-   signing secret into `RETELL_WEBHOOK_TOKEN`.
+4. Set webhooks (Retell dashboard → Webhooks) to `POST /retell/webhook`. There is
+   **no separate webhook secret in Retell** — signatures are HMAC-SHA256 keyed
+   with your existing Retell API key; the server verifies them automatically
+   (`X-Retell-Signature` header, 5-minute replay window). In simulation mode
+   (no API key configured) verification is skipped.
 5. Expose the server publicly (Fly.io/Railway, or `ngrok http 3000` for testing).
 6. Fill `.env`:
 

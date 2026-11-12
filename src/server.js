@@ -10,14 +10,17 @@
  */
 const express = require('express');
 const path = require('path');
+const crypto = require('crypto');
 const cfg = require('./config');
 const { db, nowIso, uid, getAgentByEmail, walletBalance, logEvent } = require('./db');
 const { evaluateCallBilling } = require('./billing');
-const { createPhoneCall, webhookAuthorized, findCallByRetellId, findCallById, simulation } = require('./retell');
+const { createPhoneCall, findCallByRetellId, findCallById, simulation } = require('./retell');
 const dispatcher = require('./dispatcher');
 
 const app = express();
-app.use(express.json());
+// Capture the raw body BEFORE JSON parsing — HMAC signature verification
+// (below) must run over the exact bytes Retell sent.
+app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf.toString(); } }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 const agent = () => getAgentByEmail(cfg.AGENT_EMAIL);
@@ -238,9 +241,28 @@ app.post('/retell/function/book-callback', (req, res) => {
   res.json({ ok: true });
 });
 
+// ── Retell webhook signature verification ──────────────────────────
+// Per https://docs.retellai.com/features/secure-webhook — there is NO separate
+// webhook secret in Retell: the HMAC key IS your Retell API key.
+// Header format: "v=<ms timestamp>,d=<hex hmac-sha256(rawBody + timestamp, api_key)>"
+function verifyRetellSignature(req) {
+  const secret = process.env.RETELL_API_KEY;
+  if (!secret) return true; // simulation/dev mode — no key configured yet
+  const header = req.get('x-retell-signature') || '';
+  const m = header.match(/^v=(\d+),d=([0-9a-f]{64})$/i);
+  if (!m) return false;
+  const [, timestamp, digest] = m;
+  if (Math.abs(Date.now() - Number(timestamp)) > 5 * 60 * 1000) return false; // replay guard
+  const expected = crypto
+    .createHmac('sha256', secret)
+    .update(req.rawBody + timestamp)
+    .digest('hex');
+  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(digest.toLowerCase()));
+}
+
 // ── Retell webhooks ────────────────────────────────────────────────
 app.post('/retell/webhook', (req, res) => {
-  if (!webhookAuthorized(req)) return res.status(401).json({ error: 'unauthorized' });
+  if (!verifyRetellSignature(req)) return res.status(401).json({ error: 'bad signature' });
 
   const event = req.body.event || req.body.event_type;
   const rid = req.body.call?.call_id || req.body.call_id || '';
