@@ -67,7 +67,130 @@ app.post('/api/calls/:id/disposition', (req, res) => {
   db.prepare('UPDATE calls SET disposition = ?, disposition_note = ? WHERE id = ?')
     .run(disposition, note || null, req.params.id);
   logEvent(req.params.id, 'disposition_set', { disposition });
+
+  // Propagate the tag onto the CONTACT (lead) so the database of people is
+  // dispositioned, not just the call record. Mapping:
+  //   terminal  → contact is done, never dialed again (status 'worked' + outcome set)
+  //   callback  → contact returns via the callback queue (stays callable)
+  //   no_answer → contact stays eligible; frequency caps govern retry
+  const call = findCallById(req.params.id);
+  if (call) {
+    const terminal = ['sold','appointment_set','not_interested','not_qualified','bad_number','wrong_person'];
+    if (terminal.includes(disposition)) {
+      db.prepare("UPDATE leads SET status = 'worked', outcome = ? WHERE id = ?")
+        .run(disposition, call.lead_id);
+    } else if (disposition === 'callback_requested') {
+      db.prepare("UPDATE leads SET outcome = 'callback_requested' WHERE id = ?").run(call.lead_id);
+      if (req.body.callback_in_hours) {
+        db.prepare('INSERT INTO callbacks (id, lead_id, priority, scheduled_at) VALUES (?,?,?,?)')
+          .run(uid(), call.lead_id, 10,
+               new Date(Date.now() + req.body.callback_in_hours * 3600e3).toISOString());
+        db.prepare("UPDATE leads SET status = 'callback_booked' WHERE id = ?").run(call.lead_id);
+      }
+    } else if (disposition === 'no_answer') {
+      db.prepare("UPDATE leads SET outcome = 'no_answer' WHERE id = ?").run(call.lead_id);
+    }
+  }
   res.json({ ok: true });
+});
+
+// ── Contact records: list + manual agent tagging ───────────────────
+// The leads table IS the contact CRM: every contact carries consent, source
+// (fresh/aged), call history, and an outcome tag. /api/contacts is the
+// workable view of it.
+app.get('/api/contacts', (req, res) => {
+  const a = agent();
+  const { filter } = req.query; // 'needs_disposition' | 'done' | 'all'
+  let where = "l.status IN ('worked','callback_booked','dialing')";
+  if (filter === 'done') where = "l.status = 'worked' AND l.outcome IS NOT NULL";
+  if (filter === 'needs_disposition') where = "(l.status = 'dialing' OR (l.status = 'worked' AND l.outcome IS NULL))";
+  const rows = db.prepare(`
+    SELECT l.id, l.first_name, l.last_name, l.phone_e164, l.email, l.state,
+           l.date_of_birth, l.veteran_flag, l.source_type, l.status, l.outcome,
+           l.imported_at,
+           (SELECT COUNT(*) FROM calls c WHERE c.lead_id = l.id) AS call_count,
+           (SELECT c.disposition FROM calls c WHERE c.lead_id = l.id AND c.disposition IS NOT NULL
+            ORDER BY c.created_at DESC LIMIT 1) AS last_call_disposition
+    FROM leads l WHERE ${where}
+    ORDER BY l.created_at DESC LIMIT 200`).all();
+  res.json({ contacts: rows });
+});
+
+app.post('/api/contacts/:id/outcome', (req, res) => {
+  const { outcome } = req.body;
+  const valid = ['sold','appointment_set','callback_requested','not_interested',
+                 'not_qualified','bad_number','wrong_person','no_answer','do_not_call'];
+  if (!valid.includes(outcome)) return res.status(400).json({ error: 'invalid outcome' });
+  if (outcome === 'do_not_call') {
+    const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);
+    if (lead) {
+      db.prepare('INSERT OR IGNORE INTO suppression (phone_e164, reason, source) VALUES (?,?,?)')
+        .run(lead.phone_e164, 'opt_out_voice', 'agent_tag');
+      db.prepare("UPDATE leads SET status = 'suppressed' WHERE id = ?").run(lead.id);
+    }
+  }
+  db.prepare("UPDATE leads SET outcome = ?, status = CASE WHEN ? = 'do_not_call' THEN status ELSE 'worked' END WHERE id = ?")
+    .run(outcome, outcome, req.params.id);
+  res.json({ ok: true });
+});
+
+// ── Data import: CSV with MANDATORY consent fields ─────────────────
+// Every imported record must carry a consent timestamp; batch-level consent
+// attributes (seller, channel, disclosure, action, source_type) apply to all
+// rows. Rows missing phone/state/consent_captured_at are REJECTED, not
+// silently fixed — the file goes back to the vendor.
+const CSV_REQUIRED = ['first_name','last_name','phone','state','consent_captured_at'];
+
+app.post('/api/leads/import', (req, res) => {
+  const { csv, source_type = 'aged', seller_named, capture_channel,
+          disclosure_text, affirmative_action = 'checkbox_esignature', vendor_name } = req.body;
+  if (!csv || !seller_named || !capture_channel || !disclosure_text)
+    return res.status(400).json({ error: 'csv, seller_named, capture_channel, disclosure_text are required' });
+  if (!['fresh','aged'].includes(source_type))
+    return res.status(400).json({ error: "source_type must be 'fresh' or 'aged'" });
+
+  let vendorId = null;
+  if (vendor_name) {
+    const existing = db.prepare('SELECT id FROM lead_vendors WHERE name = ?').get(vendor_name);
+    if (existing) {
+      vendorId = existing.id;
+    } else {
+      vendorId = uid();
+      db.prepare('INSERT INTO lead_vendors (id, name) VALUES (?,?)').run(vendorId, vendor_name);
+    }
+  }
+
+  const lines = csv.trim().split(/\r?\n/);
+  const header = lines[0].split(',').map(h => h.trim().toLowerCase());
+  const idx = Object.fromEntries(header.map((h, i) => [h, i]));
+  for (const col of CSV_REQUIRED) if (!(col in idx))
+    return res.status(400).json({ error: `CSV missing required column: ${col}` });
+
+  let inserted = 0; const rejected = [];
+  for (let i = 1; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
+    const cells = lines[i].split(',').map(c => c.trim());
+    const rec = Object.fromEntries(header.map((h, j) => [h, cells[j]]));
+    const phone = rec.phone.startsWith('+') ? rec.phone : `+1${rec.phone.replace(/\D/g, '')}`;
+    if (!/^\+1\d{10}$/.test(phone) || !rec.state || !rec.consent_captured_at) {
+      rejected.push({ line: i + 1, reason: 'missing/invalid phone, state, or consent_captured_at' });
+      continue;
+    }
+    const leadId = uid();
+    db.prepare(`INSERT INTO leads (id, first_name, last_name, phone_e164, email, state,
+                date_of_birth, veteran_flag, source_type, vendor_id, imported_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(leadId, rec.first_name || null, rec.last_name || null, phone, rec.email || null,
+           rec.state.toUpperCase(), rec.dob || null, rec.veteran_flag === '1' || rec.veteran_flag === 'true' ? 1 : 0,
+           source_type, vendorId || null, nowIso());
+    db.prepare(`INSERT INTO consent_records (id, lead_id, phone_e164, consent_type, ai_referenced,
+                capture_channel, disclosure_text, seller_named, affirmative_action, captured_at)
+                VALUES (?,?,?, 'PEWC', 1, ?,?,?,?,?)`)
+      .run(uid(), leadId, phone, capture_channel, disclosure_text, seller_named,
+           affirmative_action, new Date(rec.consent_captured_at).toISOString());
+    inserted++;
+  }
+  res.json({ inserted, rejected, source_type });
 });
 
 // ── Retell custom functions ────────────────────────────────────────

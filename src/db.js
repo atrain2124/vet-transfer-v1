@@ -135,6 +135,19 @@ CREATE TABLE IF NOT EXISTS callbacks (
 );
 `);
 
+// ── Lightweight column migrations (upgrades existing Render DBs in place) ──
+function addColumnIfMissing(table, colDef) {
+  const name = colDef.trim().split(/\s+/)[0];
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some(c => c.name === name)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${colDef}`);
+  }
+}
+addColumnIfMissing('leads', "source_type TEXT NOT NULL DEFAULT 'aged'"); // 'fresh' | 'aged'
+addColumnIfMissing('leads', "priority INTEGER NOT NULL DEFAULT 0");      // manual boost overrides source order
+addColumnIfMissing('leads', "outcome TEXT");                             // agent-tagged contact disposition
+addColumnIfMissing('leads', "imported_at TEXT");
+
 // ── Small helpers ──────────────────────────────────────────────────
 const nowIso = () => new Date().toISOString();
 const uid = () => require('crypto').randomUUID();

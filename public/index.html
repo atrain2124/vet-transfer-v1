@@ -88,6 +88,37 @@
   </div>
 
   <div class="card">
+    <h2>Contacts — disposition tagging</h2>
+    <div class="dispo-form" style="margin-bottom:10px;">
+      <select id="contactFilter" onchange="loadContacts()">
+        <option value="needs_disposition">Needs disposition</option>
+        <option value="done">Dispositioned</option>
+        <option value="all">All active</option>
+      </select>
+    </div>
+    <table>
+      <thead><tr><th>Contact</th><th>State</th><th>Source</th><th>Calls</th><th>Status</th><th>Outcome</th><th>Tag</th></tr></thead>
+      <tbody id="contactRows"></tbody>
+    </table>
+    <p class="muted">Outcome tags drive dialing: terminal tags (sold, appointment, not interested, bad number…) permanently stop the contact; "do not call" adds them to suppression instantly.</p>
+  </div>
+
+  <div class="card">
+    <h2>Import lead data (fresh or aged)</h2>
+    <p class="muted">CSV header row required. Columns: first_name,last_name,phone,state,email,dob,veteran_flag,consent_captured_at. Every row must carry its consent timestamp — rows missing phone, state, or consent are rejected, never silently dialed.</p>
+    <div class="dispo-form" style="margin:10px 0; display:flex; flex-wrap:wrap; gap:8px;">
+      <select id="impSourceType"><option value="aged">Aged data (called after fresh)</option><option value="fresh">Fresh data (called first)</option></select>
+      <input id="impSeller" placeholder="Seller named on consent *" style="padding:8px;" />
+      <select id="impChannel"><option value="vendor_csv">Vendor CSV</option><option value="web_form">Web form</option><option value="recorded_verbal">Recorded verbal</option></select>
+      <input id="impVendor" placeholder="Vendor name (optional)" style="padding:8px;" />
+      <input id="impFile" type="file" accept=".csv,text/csv" />
+    </div>
+    <textarea id="impDisclosure" rows="2" style="width:100%; padding:8px;" placeholder="Exact consent disclosure text the consumer saw/heard *"></textarea>
+    <div style="margin-top:8px;"><button class="cta" onclick="importCsv()">Import</button>
+    <span id="impResult" class="muted" style="margin-left:10px;"></span></div>
+  </div>
+
+  <div class="card">
     <h2>Recent calls</h2>
     <table>
       <thead><tr><th>Lead</th><th>State</th><th>Billable</th><th>Charge</th><th>Disposition</th></tr></thead>
@@ -169,6 +200,70 @@ document.getElementById('availToggle').addEventListener('change', async (e) => {
 
 refresh();
 setInterval(refresh, 3000);
+
+async function loadContacts() {
+  const filter = document.getElementById('contactFilter').value;
+  const r = await fetch('/api/contacts?filter=' + filter);
+  const { contacts } = await r.json();
+  document.getElementById('contactRows').innerHTML = contacts.map(c => `
+    <tr>
+      <td>${c.first_name || ''} ${c.last_name || ''}<br/><span class="muted">${c.phone_e164}</span></td>
+      <td>${c.state}</td>
+      <td>${c.source_type || 'aged'}</td>
+      <td>${c.call_count}</td>
+      <td>${c.status}</td>
+      <td>${c.outcome || c.last_call_disposition || '—'}</td>
+      <td>
+        <select onchange="tagContact('${c.id}', this.value)" style="font-size:11px; padding:3px;">
+          <option value="">Tag…</option>
+          <option value="sold">Sold</option>
+          <option value="appointment_set">Appointment set</option>
+          <option value="callback_requested">Callback requested</option>
+          <option value="not_interested">Not interested</option>
+          <option value="not_qualified">Not qualified</option>
+          <option value="bad_number">Bad number</option>
+          <option value="wrong_person">Wrong person</option>
+          <option value="do_not_call">Do not call</option>
+        </select>
+      </td>
+    </tr>`).join('') || '<tr><td colspan="7" class="muted">No contacts in this view.</td></tr>';
+}
+loadContacts();
+
+async function tagContact(id, outcome) {
+  if (!outcome) return;
+  await fetch(`/api/contacts/${id}/outcome`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ outcome })
+  });
+  loadContacts();
+}
+
+async function importCsv() {
+  const file = document.getElementById('impFile').files[0];
+  const seller = document.getElementById('impSeller').value.trim();
+  const disclosure = document.getElementById('impDisclosure').value.trim();
+  const resultEl = document.getElementById('impResult');
+  if (!file || !seller || !disclosure) {
+    resultEl.textContent = 'File, seller, and disclosure text are required.'; return;
+  }
+  const csv = await file.text();
+  resultEl.textContent = 'Importing…';
+  const res = await fetch('/api/leads/import', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      csv, seller_named: seller, disclosure_text: disclosure,
+      source_type: document.getElementById('impSourceType').value,
+      capture_channel: document.getElementById('impChannel').value,
+      vendor_name: document.getElementById('impVendor').value.trim() || undefined,
+    })
+  });
+  const data = await res.json();
+  resultEl.textContent = res.ok
+    ? `Imported ${data.inserted} contacts (${data.source_type}); rejected ${data.rejected.length}.`
+    : `Error: ${data.error}`;
+  loadContacts();
+}
 </script>
 </body>
 </html>

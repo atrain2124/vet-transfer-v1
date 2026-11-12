@@ -36,11 +36,18 @@ function nextLead(agentId, states) {
     .get(nowIso(), ...states);
   if (cb) return { lead: cb, callbackId: cb.callback_id };
 
-  // 2. Fresh data
+  // 2. Fresh data — FRESH FIRST, then aged (per owner policy). Within each
+  //    source: highest manual priority first, then oldest import first.
+  //    A high `priority` (e.g. 10) beats any source_type, so a hot aged list
+  //    can be force-jumped ahead of fresh if you ever want that.
   const ph = db.prepare(`
     SELECT * FROM leads
     WHERE status = 'new' AND state IN (${states.map(() => '?').join(',')})
-    ORDER BY created_at ASC LIMIT 1`).get(...states);
+    ORDER BY CASE WHEN priority >= 10 THEN 0 ELSE 1 END,
+             CASE source_type WHEN 'fresh' THEN 0 ELSE 1 END,
+             priority DESC,
+             created_at ASC
+    LIMIT 1`).get(...states);
   if (ph) return { lead: ph };
   return null;
 }
