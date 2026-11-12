@@ -1,0 +1,17 @@
+{
+  "name": "vet-transfer-v1",
+  "version": "0.1.0",
+  "description": "Single-agent AI qualification & warm-transfer system (v1 done-for-you offer)",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "seed": "node seed.js",
+    "simulate": "node test/simulate.js"
+  },
+  "engines": { "node": ">=22.13" },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}

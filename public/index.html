@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Agent Dashboard</title>
+<style>
+  :root { --navy:#10243e; --gold:#c9a227; --bg:#f4f6f9; }
+  * { box-sizing:border-box; font-family:Arial,Helvetica,sans-serif; }
+  body { margin:0; background:var(--bg); color:#1c2536; }
+  header { background:var(--navy); color:#fff; padding:14px 24px; display:flex; align-items:center; gap:16px; }
+  header h1 { font-size:16px; margin:0; flex:1; }
+  .badge { font-size:11px; padding:3px 10px; border-radius:12px; background:#3a4a63; }
+  .badge.live { background:#8a5d00; }
+  main { max-width:760px; margin:24px auto; padding:0 16px; }
+  .card { background:#fff; border:1px solid #d4dae2; border-radius:8px; padding:18px; margin-bottom:16px; }
+  .card h2 { margin:0 0 12px 0; font-size:14px; text-transform:uppercase; letter-spacing:1px; color:var(--navy); }
+  .toggle-row { display:flex; align-items:center; gap:14px; }
+  .switch { position:relative; width:52px; height:28px; }
+  .switch input { opacity:0; width:0; height:0; }
+  .slider { position:absolute; inset:0; background:#b6bfcc; border-radius:28px; cursor:pointer; transition:.2s; }
+  .slider:before { content:""; position:absolute; width:22px; height:22px; border-radius:50%; background:#fff; top:3px; left:3px; transition:.2s; }
+  input:checked + .slider { background:#2e7d32; }
+  input:checked + .slider:before { transform:translateX(24px); }
+  .status { font-weight:bold; }
+  .balance { font-size:26px; font-weight:bold; color:var(--navy); }
+  .muted { color:#5a6472; font-size:12px; }
+  .screenpop { border:2px solid var(--gold); background:#fdfaf1; padding:14px; border-radius:8px; }
+  .screenpop .name { font-size:20px; font-weight:bold; color:var(--navy); }
+  .screenpop .row { margin:4px 0; font-size:14px; }
+  .buffer-chip { display:inline-block; background:var(--navy); color:#fff; padding:2px 10px; border-radius:10px; font-size:12px; }
+  select, button.cta { padding:8px 12px; font-size:14px; border-radius:6px; border:1px solid #d4dae2; }
+  button.cta { background:var(--navy); color:#fff; border:none; cursor:pointer; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid #e4e8ee; }
+  th { color:#5a6472; font-size:11px; text-transform:uppercase; }
+  .billable-yes { color:#2e7d32; font-weight:bold; }
+  .billable-no { color:#b00020; }
+  .dispo-form select, .dispo-form button { margin-right:8px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="agentName">Agent Dashboard</h1>
+  <span class="badge" id="modeBadge"></span>
+</header>
+<main>
+  <div class="card">
+    <h2>Availability</h2>
+    <div class="toggle-row">
+      <label class="switch">
+        <input type="checkbox" id="availToggle" />
+        <span class="slider"></span>
+      </label>
+      <span class="status" id="availStatus">Unavailable</span>
+    </div>
+    <p class="muted">While ON, the AI works your data and warm-transfers qualified prospects. Toggle off anytime — dialing stops instantly.</p>
+  </div>
+
+  <div class="card">
+    <h2>Wallet</h2>
+    <div class="balance" id="balance">—</div>
+    <p class="muted">Transferred calls bill after the <span id="bufferLabel">90</span>-second buffer. Calls that drop inside the buffer are never charged.</p>
+  </div>
+
+  <div class="card hidden" id="screenpopCard">
+    <h2>Live transfer — screen pop</h2>
+    <div class="screenpop" id="screenpop">
+      <div class="name" id="spName"></div>
+      <div class="row" id="spPhone"></div>
+      <div class="row" id="spEmail"></div>
+      <div class="row" id="spMeta"></div>
+      <div class="row" style="margin-top:8px;"><span class="buffer-chip" id="spBuffer"></span></div>
+    </div>
+    <div class="dispo-form" style="margin-top:12px;">
+      <select id="dispoSelect">
+        <option value="">Set disposition…</option>
+        <option value="sold">Sold</option>
+        <option value="appointment_set">Appointment set</option>
+        <option value="callback_requested">Callback requested</option>
+        <option value="not_interested">Not interested</option>
+        <option value="not_qualified">Not qualified</option>
+        <option value="bad_number">Bad number</option>
+        <option value="wrong_person">Wrong person</option>
+      </select>
+      <button class="cta" onclick="submitDisposition()">Save</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Recent calls</h2>
+    <table>
+      <thead><tr><th>Lead</th><th>State</th><th>Billable</th><th>Charge</th><th>Disposition</th></tr></thead>
+      <tbody id="recentRows"></tbody>
+    </table>
+  </div>
+</main>
+
+<script>
+let state = null;
+let activeCallId = null;
+
+async function refresh() {
+  const r = await fetch('/api/state');
+  state = await r.json();
+
+  document.getElementById('agentName').textContent =
+    `${state.agent.name} — AI Transfer Dashboard`;
+  document.getElementById('modeBadge').textContent =
+    state.simulation ? 'SIMULATION MODE' : 'LIVE';
+  document.getElementById('modeBadge').classList.toggle('live', !state.simulation);
+
+  const toggle = document.getElementById('availToggle');
+  toggle.checked = state.agent.availability === 'AVAILABLE';
+  document.getElementById('availStatus').textContent =
+    state.agent.availability.replace('_',' ');
+
+  document.getElementById('balance').textContent =
+    '$' + (state.wallet_balance_cents / 100).toFixed(2);
+  document.getElementById('bufferLabel').textContent = state.agent.buffer_seconds;
+
+  const card = document.getElementById('screenpopCard');
+  if (state.active_call) {
+    card.classList.remove('hidden');
+    activeCallId = state.active_call.id;
+    const c = state.active_call;
+    document.getElementById('spName').textContent = `${c.first_name || ''} ${c.last_name || ''}`;
+    document.getElementById('spPhone').textContent = 'Phone: ' + c.phone_e164;
+    document.getElementById('spEmail').textContent = 'Email: ' + (c.email || '—');
+    document.getElementById('spMeta').textContent =
+      `State: ${c.state} · DOB: ${c.date_of_birth || '—'} · Veteran: ${c.veteran_flag ? 'Yes' : 'No'}`;
+    const connected = new Date(c.transfer_connected_at + 'Z').getTime();
+    const elapsed = Math.floor((Date.now() - connected) / 1000);
+    const remaining = Math.max(0, state.agent.buffer_seconds - elapsed);
+    document.getElementById('spBuffer').textContent =
+      remaining > 0 ? `Buffer: ${remaining}s (not yet billable)` : 'Billable call';
+  } else {
+    card.classList.add('hidden');
+  }
+
+  document.getElementById('recentRows').innerHTML = state.recent_calls.map(c => `
+    <tr>
+      <td>${c.first_name || ''} ${c.last_name || ''}</td>
+      <td>${c.state}</td>
+      <td class="${c.billable ? 'billable-yes' : 'billable-no'}">${c.billable ? 'Yes' : 'No / void'}</td>
+      <td>${c.amount_charged_cents ? '$' + (c.amount_charged_cents/100).toFixed(2) : '—'}</td>
+      <td>${c.disposition || '—'}</td>
+    </tr>`).join('');
+}
+
+async function submitDisposition() {
+  const disposition = document.getElementById('dispoSelect').value;
+  if (!disposition || !activeCallId) return;
+  await fetch(`/api/calls/${activeCallId}/disposition`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ disposition })
+  });
+  document.getElementById('dispoSelect').value = '';
+  refresh();
+}
+
+document.getElementById('availToggle').addEventListener('change', async (e) => {
+  await fetch('/api/availability', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ available: e.target.checked })
+  });
+  refresh();
+});
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>
