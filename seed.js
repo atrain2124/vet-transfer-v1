@@ -6,8 +6,9 @@
 const { db, uid, getAgentByEmail, walletAdjust } = require('./src/db');
 const cfg = require('./src/config');
 
-const agentId = uid();
-const vendorId = uid();
+function runSeed() {
+  const agentId = uid();
+  const vendorId = uid();
 
 db.prepare(`INSERT INTO agents (id, email, first_name, last_name, agency_name, transfer_phone)
             VALUES (?,?,?,?,?,?)`)
@@ -60,3 +61,8 @@ db.prepare('INSERT INTO suppression (phone_e164, reason, source) VALUES (?,?,?)'
 walletAdjust(agentId, 'topup', 50000, null, 'Seed top-up ($500)');
 
 console.log(`Seeded agent ${cfg.AGENT_EMAIL}: 25 dialable leads (TX/FL), 1 suppressed, wallet $500.00.`);
+return { agentId };
+}
+
+if (require.main === module) runSeed();
+module.exports = { runSeed };

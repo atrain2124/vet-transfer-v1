@@ -312,6 +312,13 @@ app.post('/retell/webhook', (req, res) => {
 });
 
 // ── Boot ───────────────────────────────────────────────────────────
+// Auto-seed on first boot: an empty database (fresh disk, wiped ephemeral
+// storage) bootstraps the demo agent + consented leads automatically.
+if (db.prepare('SELECT COUNT(*) AS n FROM agents').get().n === 0) {
+  console.log('[boot] empty database — seeding agent + consented leads');
+  require('../seed').runSeed();
+}
+
 app.listen(cfg.PORT, '0.0.0.0', () => {
   console.log(`vet-transfer-v1 listening on :${cfg.PORT} (mode: ${simulation() ? 'SIMULATION' : 'LIVE'})`);
   dispatcher.start(2000);
