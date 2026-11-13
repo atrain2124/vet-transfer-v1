@@ -6,8 +6,24 @@
 const { DatabaseSync } = require('node:sqlite');
 const path = require('path');
 
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'app.db');
-require('fs').mkdirSync(path.dirname(DB_PATH), { recursive: true });
+// Resolve the data directory. DB_PATH (e.g. /var/data/app.db on Render with a
+// Persistent Disk) wins. If its parent can't be created (disk not attached /
+// not on a paid plan), fall back to local ./data LOUDLY — ephemeral storage
+// means the DB is wiped on every deploy/restart. Never crash-loop over this.
+let DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'app.db');
+let persistent = true;
+try {
+  require('fs').mkdirSync(path.dirname(DB_PATH), { recursive: true });
+} catch (err) {
+  persistent = false;
+  DB_PATH = path.join(__dirname, '..', 'data', 'app.db');
+  require('fs').mkdirSync(path.dirname(DB_PATH), { recursive: true });
+  console.warn('='.repeat(70));
+  console.warn(`WARNING: DB_PATH parent not writable (${err.code}) — using EPHEMERAL local storage.`);
+  console.warn('The database will be WIPED on every deploy/restart. Attach a Render');
+  console.warn('Persistent Disk at /var/data (paid plan) to make storage durable.');
+  console.warn('='.repeat(70));
+}
 
 const db = new DatabaseSync(DB_PATH);
 db.exec('PRAGMA journal_mode = WAL;');
